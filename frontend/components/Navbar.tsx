@@ -4,6 +4,7 @@ import Link from 'next/link';
 import { useState } from 'react';
 import { Clock, Layers, Users, BarChart3, Play, Menu, X, ShieldCheck } from 'lucide-react';
 import ThemeToggle from './ThemeToggle';
+import LiveClockIST from './LiveClockIST';
 
 export default function Navbar() {
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
@@ -66,6 +67,7 @@ export default function Navbar() {
 
           {/* Actions & Theme */}
           <div className="hidden md:flex items-center space-x-4">
+            <LiveClockIST showDate={true} />
             <ThemeToggle />
             <Link
               href="/join"
@@ -77,6 +79,7 @@ export default function Navbar() {
 
           {/* Mobile hamburger */}
           <div className="flex md:hidden items-center space-x-2">
+            <LiveClockIST badgeOnly={true} className="text-[11px]" />
             <ThemeToggle />
             <button
               onClick={() => setMobileMenuOpen(!mobileMenuOpen)}
@@ -90,6 +93,10 @@ export default function Navbar() {
         {/* Mobile menu dropdown */}
         {mobileMenuOpen && (
           <div className="md:hidden py-4 border-t border-slate-200 dark:border-slate-800 space-y-3">
+            <div className="px-3 pb-2 flex justify-between items-center border-b border-slate-100 dark:border-slate-800">
+              <span className="text-xs text-slate-500 font-medium">Standard Time:</span>
+              <LiveClockIST showDate={true} />
+            </div>
             <Link
               href="/join"
               onClick={() => setMobileMenuOpen(false)}

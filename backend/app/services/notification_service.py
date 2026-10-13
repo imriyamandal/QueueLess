@@ -12,12 +12,35 @@ from app.services.fcm_service import FcmService
 
 logger = logging.getLogger("queueless.notifications")
 
-def normalize_phone_number(phone: str) -> str:
+def is_valid_phone_number(phone: Optional[str]) -> bool:
+    """
+    Validates phone number format.
+    Accepts 10-digit Indian numbers (with/without +91/91 prefix)
+    and valid international E.164 phone numbers (8-15 digits with +).
+    """
+    if not phone or not isinstance(phone, str):
+        return False
+    cleaned = re.sub(r"[\s\-\(\)\.]", "", phone.strip())
+    if not cleaned:
+        return False
+    if cleaned.startswith("+"):
+        digits = cleaned[1:]
+        return digits.isdigit() and 8 <= len(digits) <= 15
+    if len(cleaned) == 10 and cleaned.isdigit() and cleaned[0] in "6789":
+        return True
+    if len(cleaned) == 12 and cleaned.isdigit() and cleaned.startswith("91") and cleaned[2] in "6789":
+        return True
+    return cleaned.isdigit() and 8 <= len(cleaned) <= 15
+
+def normalize_phone_number(phone: Optional[str]) -> Optional[str]:
     """
     Cleans and normalizes phone number to E.164 standard.
     Defaults 10-digit Indian numbers to +91.
+    Returns None if phone number is invalid or empty.
     """
-    cleaned = re.sub(r"[\s\-\(\)]", "", phone.strip())
+    if not is_valid_phone_number(phone):
+        return None
+    cleaned = re.sub(r"[\s\-\(\)\.]", "", phone.strip())
     if cleaned.startswith("+"):
         return cleaned
     if len(cleaned) == 10 and cleaned[0] in "6789":
@@ -84,8 +107,13 @@ class NotificationService:
 
         entry.fcm_token = fcm_token.strip()
         entry.fcm_token_updated_at = utc_now()
-        db.commit()
-        db.refresh(entry)
+        try:
+            db.commit()
+            db.refresh(entry)
+        except Exception as e:
+            db.rollback()
+            logger.error(f"Failed to save FCM token for ticket {ticket_id}: {e}")
+            raise
         logger.info(f"Updated FCM token for ticket {entry.token_number}")
         return entry
 
@@ -100,24 +128,34 @@ class NotificationService:
         """
         Dispatches SMS via configured provider (Mock or MSG91).
         Clearly records channel='SMS'. Never conflates with Web Push.
+        Only dispatches for valid phone numbers and when SMS is enabled.
         """
         if not entry.visitor_phone or not settings.SMS_ENABLED:
             return None
 
         normalized_phone = normalize_phone_number(entry.visitor_phone)
+        if not normalized_phone:
+            logger.warning(
+                f"Skipping SMS for ticket {entry.token_number}: phone '{entry.visitor_phone}' is invalid."
+            )
+            return None
 
         # Idempotency check: don't send duplicate SMS for the same ticket and event type
-        existing = (
-            db.query(NotificationDelivery)
-            .filter(
-                NotificationDelivery.entry_id == entry.id,
-                NotificationDelivery.event_type == event_type,
-                NotificationDelivery.channel == "SMS",
+        try:
+            existing = (
+                db.query(NotificationDelivery)
+                .filter(
+                    NotificationDelivery.entry_id == entry.id,
+                    NotificationDelivery.event_type == event_type,
+                    NotificationDelivery.channel == "SMS",
+                )
+                .first()
             )
-            .first()
-        )
-        if existing:
-            return existing
+            if existing:
+                return existing
+        except Exception as e:
+            logger.warning(f"Error checking existing SMS delivery for entry {entry.id}: {e}")
+            db.rollback()
 
         provider = get_sms_provider()
         provider_name = settings.SMS_PROVIDER.lower() if settings.SMS_PROVIDER else "mock"
@@ -130,6 +168,7 @@ class NotificationService:
             entry_id=entry.id,
             channel="SMS",
             recipient_phone=normalized_phone,
+            recipient_token=None,
             event_type=event_type,
             provider=provider_name,
             status=delivery_status,
@@ -139,10 +178,15 @@ class NotificationService:
             created_at=utc_now(),
             delivered_at=utc_now() if success else None,
         )
-        db.add(delivery)
-        db.commit()
-        db.refresh(delivery)
-        return delivery
+        try:
+            db.add(delivery)
+            db.commit()
+            db.refresh(delivery)
+            return delivery
+        except Exception as e:
+            db.rollback()
+            logger.error(f"Failed to record SMS delivery for entry {entry.id}: {e}")
+            return None
 
     @classmethod
     def notify_ticket_joined(cls, db: Session, entry: QueueEntry, service_name: str, est_wait_mins: int):
@@ -242,6 +286,16 @@ class NotificationService:
     @classmethod
     def send_test_sms(cls, phone: str, message: str) -> Dict:
         norm_phone = normalize_phone_number(phone)
+        if not norm_phone:
+            return {
+                "success": False,
+                "provider": (settings.SMS_PROVIDER or "mock").lower(),
+                "channel": "SMS",
+                "recipient_phone": phone,
+                "message_id": "",
+                "is_simulated": True,
+                "error": f"Invalid phone number format: '{phone}'. Provide a valid 10-digit Indian number or international E.164 format.",
+            }
         provider = get_sms_provider()
         provider_name = settings.SMS_PROVIDER.lower() if settings.SMS_PROVIDER else "mock"
         success, msg_id, err = provider.send_sms(norm_phone, message)

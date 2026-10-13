@@ -31,21 +31,35 @@ def get_staff_dashboard(
     counter_responses = []
     now = utc_now()
 
-    for c in counters:
-        curr_entry = None
-        service_elapsed = None
-        if c.current_entry_id:
-            curr_entry = db.query(QueueEntry).filter(QueueEntry.id == c.current_entry_id).first()
-            if curr_entry and curr_entry.service_start_at:
-                s_utc = ensure_utc(curr_entry.service_start_at)
-                n_utc = ensure_utc(now)
-                service_elapsed = int((n_utc - s_utc).total_seconds()) if s_utc and n_utc else None
+    # Optimized batch fetching to avoid N+1 queries
+    entry_ids = [c.current_entry_id for c in counters if c.current_entry_id]
+    entries_by_id = (
+        {e.id: e for e in db.query(QueueEntry).filter(QueueEntry.id.in_(entry_ids)).all()}
+        if entry_ids
+        else {}
+    )
 
-        supported = [
-            cs.service.name
-            for cs in db.query(CounterService).filter(CounterService.counter_id == c.id).all()
-            if cs.service
-        ]
+    counter_ids = [c.id for c in counters]
+    all_counter_services = (
+        db.query(CounterService)
+        .filter(CounterService.counter_id.in_(counter_ids))
+        .all()
+    ) if counter_ids else []
+
+    services_by_counter: Dict[str, List[str]] = {}
+    for cs in all_counter_services:
+        if cs.service:
+            services_by_counter.setdefault(cs.counter_id, []).append(cs.service.name)
+
+    for c in counters:
+        curr_entry = entries_by_id.get(c.current_entry_id) if c.current_entry_id else None
+        service_elapsed = None
+        if curr_entry and curr_entry.service_start_at:
+            s_utc = ensure_utc(curr_entry.service_start_at)
+            n_utc = ensure_utc(now)
+            service_elapsed = int((n_utc - s_utc).total_seconds()) if s_utc and n_utc else None
+
+        supported = services_by_counter.get(c.id, [])
 
         counter_responses.append(
             CounterResponse(
@@ -219,6 +233,14 @@ async def pause_counter(
     db: Session = Depends(get_db),
 ):
     counter = QueueEngine.toggle_counter_pause(db, counter_id, pause=True, staff_actor=current_user.email)
+    queues = db.query(Queue).filter(Queue.facility_id == counter.facility_id, Queue.status == "OPEN").all()
+    for q in queues:
+        background_tasks.add_task(
+            ws_manager.broadcast_queue_event,
+            q.id,
+            "COUNTER_PAUSED",
+            {"counter_id": counter.id, "name": counter.name},
+        )
     return {"success": True, "message": f"Counter {counter.name} paused."}
 
 @router.post("/counters/{counter_id}/resume")
@@ -229,4 +251,12 @@ async def resume_counter(
     db: Session = Depends(get_db),
 ):
     counter = QueueEngine.toggle_counter_pause(db, counter_id, pause=False, staff_actor=current_user.email)
+    queues = db.query(Queue).filter(Queue.facility_id == counter.facility_id, Queue.status == "OPEN").all()
+    for q in queues:
+        background_tasks.add_task(
+            ws_manager.broadcast_queue_event,
+            q.id,
+            "COUNTER_RESUMED",
+            {"counter_id": counter.id, "name": counter.name},
+        )
     return {"success": True, "message": f"Counter {counter.name} resumed."}

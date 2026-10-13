@@ -4,20 +4,29 @@ import { useState, useEffect } from 'react';
 import { api, TicketDetail, StaffDashboardData, WS_BASE_URL } from '../../lib/api';
 import { 
   Play, RotateCcw, UserPlus, PauseCircle, PhoneOff, CheckCircle2, 
-  Sparkles, AlertCircle, Compass, Cpu, Activity, Clock 
+  Sparkles, AlertCircle, Compass, Cpu, Activity, Clock, Radio, RefreshCw 
 } from 'lucide-react';
+import LiveClockIST from '../../components/LiveClockIST';
 
 export default function DemoSimulatorPage() {
   const [staffData, setStaffData] = useState<StaffDashboardData | null>(null);
   const [activeTicket, setActiveTicket] = useState<TicketDetail | null>(null);
   const [actionLoading, setActionLoading] = useState(false);
+  const [wsConnected, setWsConnected] = useState(false);
   const [logMessages, setLogMessages] = useState<string[]>([
     'Demo scenario initialized with 3 counters and 4 waiting visitors.',
   ]);
 
   const addLog = (msg: string) => {
+    const timeStr = new Date().toLocaleTimeString('en-US', {
+      timeZone: 'Asia/Kolkata',
+      hour: '2-digit',
+      minute: '2-digit',
+      second: '2-digit',
+      hour12: true,
+    });
     setLogMessages((prev) => [
-      `[${new Date().toLocaleTimeString()}] ${msg}`,
+      `[${timeStr} IST] ${msg}`,
       ...prev.slice(0, 7),
     ]);
   };
@@ -36,15 +45,66 @@ export default function DemoSimulatorPage() {
         setActiveTicket(ticketDetail);
       }
     } catch (e) {
-      console.error(e);
+      console.error('Failed to refresh demo scenario state:', e);
     }
   };
 
   useEffect(() => {
     refreshState();
-    const interval = setInterval(refreshState, 4000);
-    return () => clearInterval(interval);
   }, []);
+
+  // WebSocket Live Sync for demo sandbox
+  useEffect(() => {
+    const qId = staffData?.active_queue_id;
+    if (!qId) return;
+
+    let ws: WebSocket | null = null;
+    let reconnectTimeout: any = null;
+    let isSubscribed = true;
+
+    const connectWs = () => {
+      if (!isSubscribed) return;
+      try {
+        ws = new WebSocket(`${WS_BASE_URL}/queues/${qId}`);
+        ws.onopen = () => {
+          if (isSubscribed) setWsConnected(true);
+        };
+        ws.onmessage = () => {
+          if (isSubscribed) refreshState();
+        };
+        ws.onclose = () => {
+          if (isSubscribed) {
+            setWsConnected(false);
+            reconnectTimeout = setTimeout(connectWs, 3000);
+          }
+        };
+        ws.onerror = () => {
+          if (isSubscribed) {
+            setWsConnected(false);
+            ws?.close();
+          }
+        };
+      } catch (e) {
+        if (isSubscribed) {
+          setWsConnected(false);
+          reconnectTimeout = setTimeout(connectWs, 5000);
+        }
+      }
+    };
+
+    connectWs();
+    const intervalMs = wsConnected ? 20000 : 5000;
+    const interval = setInterval(() => {
+      if (isSubscribed) refreshState();
+    }, intervalMs);
+
+    return () => {
+      isSubscribed = false;
+      if (ws) ws.close();
+      if (reconnectTimeout) clearTimeout(reconnectTimeout);
+      clearInterval(interval);
+    };
+  }, [staffData?.active_queue_id, wsConnected]);
 
   const triggerAction = async (action: string, payload?: any) => {
     setActionLoading(true);
@@ -89,11 +149,20 @@ export default function DemoSimulatorPage() {
 
       {/* CONTROLS TOOLBAR */}
       <div className="bg-white dark:bg-slate-900 p-6 rounded-2xl border border-slate-200 dark:border-slate-800 shadow-md space-y-4">
-        <div className="flex justify-between items-center">
-          <span className="text-xs font-bold uppercase tracking-wider text-slate-500 dark:text-slate-400">
-            Scenario Event Injections
-          </span>
-          <span className="text-xs text-slate-400">Click any action to see live multi-counter recomputation</span>
+        <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-2">
+          <div className="flex items-center space-x-2">
+            <span className="text-xs font-bold uppercase tracking-wider text-slate-500 dark:text-slate-400">
+              Scenario Event Injections
+            </span>
+            <div className="flex items-center space-x-1.5 text-xs text-slate-500">
+              <span className={`w-2 h-2 rounded-full ${wsConnected ? 'bg-emerald-500 animate-pulse' : 'bg-amber-400'}`} />
+              <span>{wsConnected ? 'Live Synchronized' : 'Polling Sync'}</span>
+            </div>
+          </div>
+          <div className="flex items-center space-x-3">
+            <LiveClockIST showDate={true} />
+            <span className="text-xs text-slate-400 hidden md:inline">Click any action for multi-counter recomputation</span>
+          </div>
         </div>
 
         <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3">

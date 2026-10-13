@@ -250,13 +250,23 @@ async def cancel_ticket(
     return build_ticket_response(db, entry)
 
 @router.post("/tickets/{ticket_id}/check-in", response_model=TicketDetailResponse)
-def check_in_ticket(ticket_id: str, db: Session = Depends(get_db)):
+async def check_in_ticket(
+    ticket_id: str,
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
+):
     entry = db.query(QueueEntry).filter(QueueEntry.id == ticket_id).first()
     if not entry:
         raise HTTPException(status_code=404, detail="Ticket not found")
     entry.check_in_at = utc_now()
     db.commit()
     db.refresh(entry)
+    background_tasks.add_task(
+        ws_manager.broadcast_queue_event,
+        entry.queue_id,
+        "TOKEN_CHECKED_IN",
+        {"token": entry.token_number, "id": entry.id},
+    )
     return build_ticket_response(db, entry)
 
 @router.get("/tickets/{ticket_id}/prediction")

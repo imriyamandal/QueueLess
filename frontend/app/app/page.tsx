@@ -7,6 +7,7 @@ import {
   Clock, Plus, ArrowRight, Ticket, Search, Filter, 
   CheckCircle2, AlertCircle, Phone, Calendar, RefreshCw 
 } from 'lucide-react';
+import LiveClockIST from '../../components/LiveClockIST';
 
 function formatDuration(seconds?: number): string {
   if (seconds === undefined || seconds === null) return '--';
@@ -91,9 +92,12 @@ export default function VisitorPortalPage() {
       {/* Header */}
       <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4 border-b border-slate-200 dark:border-slate-800 pb-6">
         <div>
-          <span className="text-xs font-bold uppercase tracking-wider text-blue-600 dark:text-blue-400">
-            Visitor Portal
-          </span>
+          <div className="flex flex-wrap items-center gap-2 mb-1">
+            <span className="text-xs font-bold uppercase tracking-wider text-blue-600 dark:text-blue-400">
+              Visitor Portal
+            </span>
+            <LiveClockIST showDate={true} />
+          </div>
           <h1 className="text-3xl font-extrabold text-slate-900 dark:text-white mt-1">
             My Virtual Queue History
           </h1>

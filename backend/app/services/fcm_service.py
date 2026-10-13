@@ -120,17 +120,21 @@ class FcmService:
             return None
 
         # Check idempotency for critical events (e.g. approaching, called)
-        existing = (
-            db.query(NotificationDelivery)
-            .filter(
-                NotificationDelivery.entry_id == entry.id,
-                NotificationDelivery.event_type == event_type,
-                NotificationDelivery.channel == "PUSH",
+        try:
+            existing = (
+                db.query(NotificationDelivery)
+                .filter(
+                    NotificationDelivery.entry_id == entry.id,
+                    NotificationDelivery.event_type == event_type,
+                    NotificationDelivery.channel == "PUSH",
+                )
+                .first()
             )
-            .first()
-        )
-        if existing:
-            return existing
+            if existing:
+                return existing
+        except Exception as e:
+            logger.warning(f"Error checking existing PUSH delivery for entry {entry.id}: {e}")
+            db.rollback()
 
         app = cls.get_firebase_app()
         is_live = app is not None
@@ -138,11 +142,13 @@ class FcmService:
 
         delivery_status = "DELIVERED" if success and is_live else ("DELIVERED_SIMULATED" if success else "FAILED")
 
+        phone_val = entry.visitor_phone.strip() if entry.visitor_phone and entry.visitor_phone.strip() else None
+
         delivery = NotificationDelivery(
             entry_id=entry.id,
             channel="PUSH",
             recipient_token=entry.fcm_token,
-            recipient_phone=entry.visitor_phone,
+            recipient_phone=phone_val,
             event_type=event_type,
             provider="firebase_fcm",
             status=delivery_status,
@@ -152,7 +158,12 @@ class FcmService:
             created_at=utc_now(),
             delivered_at=utc_now() if success else None,
         )
-        db.add(delivery)
-        db.commit()
-        db.refresh(delivery)
-        return delivery
+        try:
+            db.add(delivery)
+            db.commit()
+            db.refresh(delivery)
+            return delivery
+        except Exception as e:
+            db.rollback()
+            logger.error(f"Failed to record PUSH delivery for ticket {entry.token_number}: {e}")
+            return None

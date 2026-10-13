@@ -6,6 +6,7 @@ import {
   Users, Play, CheckCircle2, PauseCircle, PhoneOff, RotateCcw, 
   Clock, AlertCircle, RefreshCw, Radio, Shield, Check, UserCheck 
 } from 'lucide-react';
+import LiveClockIST from '../../components/LiveClockIST';
 
 export default function StaffDeskPage() {
   const [data, setData] = useState<StaffDashboardData | null>(null);
@@ -17,51 +18,105 @@ export default function StaffDeskPage() {
   const [feedback, setFeedback] = useState<string | null>(null);
   const [wsConnected, setWsConnected] = useState(false);
 
-  const loadData = async (qId?: string) => {
+  const loadQueues = async () => {
     try {
       const qList = await api.getQueues();
       setQueues(qList);
-
-      const targetQ = qId || selectedQueueId || (qList[0]?.id ?? '');
-      if (!selectedQueueId && targetQ) {
-        setSelectedQueueId(targetQ);
+      if (!selectedQueueId && qList.length > 0) {
+        setSelectedQueueId(qList[0].id);
       }
+      return qList;
+    } catch (err: any) {
+      console.error('Failed to load queues:', err);
+      return [];
+    }
+  };
 
+  const loadDashboard = async (qId?: string) => {
+    const targetQ = qId || selectedQueueId;
+    if (!targetQ) return;
+    try {
       const dashData = await api.getStaffDashboard(targetQ);
       setData(dashData);
     } catch (err: any) {
-      console.error(err);
+      console.error('Failed to load staff dashboard:', err);
     } finally {
       setLoading(false);
     }
   };
 
+  // Initial load
   useEffect(() => {
-    loadData();
+    loadQueues().then((list) => {
+      const firstId = list[0]?.id;
+      if (firstId) {
+        loadDashboard(firstId);
+      } else {
+        setLoading(false);
+      }
+    });
+  }, []);
+
+  // Fetch when queue selection changes
+  useEffect(() => {
+    if (selectedQueueId) {
+      loadDashboard(selectedQueueId);
+    }
   }, [selectedQueueId]);
 
-  // WebSocket Live Sync
+  // Resilient WebSocket Live Sync with Auto-Reconnect
   useEffect(() => {
     if (!selectedQueueId) return;
 
     let ws: WebSocket | null = null;
-    try {
-      ws = new WebSocket(`${WS_BASE_URL}/queues/${selectedQueueId}`);
-      ws.onopen = () => setWsConnected(true);
-      ws.onmessage = () => loadData(selectedQueueId);
-      ws.onclose = () => setWsConnected(false);
-      ws.onerror = () => setWsConnected(false);
-    } catch (e) {
-      setWsConnected(false);
-    }
+    let reconnectTimer: any = null;
+    let isSubscribed = true;
 
-    const interval = setInterval(() => loadData(selectedQueueId), 6000);
+    const connectWs = () => {
+      if (!isSubscribed) return;
+      try {
+        ws = new WebSocket(`${WS_BASE_URL}/queues/${selectedQueueId}`);
+        ws.onopen = () => {
+          if (isSubscribed) setWsConnected(true);
+        };
+        ws.onmessage = () => {
+          if (isSubscribed) loadDashboard(selectedQueueId);
+        };
+        ws.onclose = () => {
+          if (isSubscribed) {
+            setWsConnected(false);
+            reconnectTimer = setTimeout(connectWs, 3000);
+          }
+        };
+        ws.onerror = () => {
+          if (isSubscribed) {
+            setWsConnected(false);
+            ws?.close();
+          }
+        };
+      } catch (e) {
+        if (isSubscribed) {
+          setWsConnected(false);
+          reconnectTimer = setTimeout(connectWs, 5000);
+        }
+      }
+    };
+
+    connectWs();
+
+    // Adaptive fallback polling: 25s when WebSocket is active, 6s when disconnected
+    const pollIntervalMs = wsConnected ? 25000 : 6000;
+    const interval = setInterval(() => {
+      if (isSubscribed) loadDashboard(selectedQueueId);
+    }, pollIntervalMs);
 
     return () => {
+      isSubscribed = false;
       if (ws) ws.close();
+      if (reconnectTimer) clearTimeout(reconnectTimer);
       clearInterval(interval);
     };
-  }, [selectedQueueId]);
+  }, [selectedQueueId, wsConnected]);
 
   const showToast = (msg: string) => {
     setFeedback(msg);
@@ -75,7 +130,7 @@ export default function StaffDeskPage() {
     try {
       const res = await api.callNext(selectedQueueId, selectedCounterId);
       showToast(res.message);
-      await loadData(selectedQueueId);
+      await loadDashboard(selectedQueueId);
     } catch (err: any) {
       alert(err.message || 'Failed to call visitor.');
     } finally {
@@ -88,7 +143,7 @@ export default function StaffDeskPage() {
     try {
       const res = await api.startService(ticketId);
       showToast(res.message);
-      await loadData(selectedQueueId);
+      await loadDashboard(selectedQueueId);
     } catch (err: any) {
       alert(err.message || 'Failed to start service.');
     } finally {
@@ -101,7 +156,7 @@ export default function StaffDeskPage() {
     try {
       const res = await api.completeService(ticketId);
       showToast(res.message);
-      await loadData(selectedQueueId);
+      await loadDashboard(selectedQueueId);
     } catch (err: any) {
       alert(err.message || 'Failed to complete service.');
     } finally {
@@ -115,7 +170,7 @@ export default function StaffDeskPage() {
     try {
       const res = await api.markNoShow(ticketId);
       showToast(res.message);
-      await loadData(selectedQueueId);
+      await loadDashboard(selectedQueueId);
     } catch (err: any) {
       alert(err.message || 'Failed to mark no-show.');
     } finally {
@@ -128,7 +183,7 @@ export default function StaffDeskPage() {
     try {
       const res = await api.requeueTicket(ticketId);
       showToast(res.message);
-      await loadData(selectedQueueId);
+      await loadDashboard(selectedQueueId);
     } catch (err: any) {
       alert(err.message || 'Failed to requeue visitor.');
     } finally {
@@ -146,7 +201,7 @@ export default function StaffDeskPage() {
         const res = await api.pauseCounter(counter.id);
         showToast(res.message);
       }
-      await loadData(selectedQueueId);
+      await loadDashboard(selectedQueueId);
     } catch (err: any) {
       alert(err.message || 'Failed to toggle counter status.');
     } finally {
@@ -159,7 +214,7 @@ export default function StaffDeskPage() {
       {/* Header */}
       <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4 border-b border-slate-200 dark:border-slate-800 pb-6">
         <div>
-          <div className="flex items-center space-x-2">
+          <div className="flex flex-wrap items-center gap-2">
             <span className="px-2.5 py-0.5 rounded-full text-xs font-bold bg-blue-100 dark:bg-blue-950 text-blue-700 dark:text-blue-300">
               Staff Portal
             </span>
@@ -167,13 +222,14 @@ export default function StaffDeskPage() {
               <span className={`w-2 h-2 rounded-full ${wsConnected ? 'bg-emerald-500 animate-pulse' : 'bg-amber-400'}`} />
               <span>{wsConnected ? 'Live Synchronized' : 'Polling Sync'}</span>
             </div>
+            <LiveClockIST showDate={true} />
           </div>
           <h1 className="text-2xl sm:text-3xl font-extrabold text-slate-900 dark:text-white mt-1">
             Service Desk Operations
           </h1>
         </div>
 
-        {/* Queue Selector */}
+        {/* Queue Selector & Controls */}
         <div className="flex items-center space-x-3">
           <label className="text-xs font-semibold text-slate-500 dark:text-slate-400">Queue:</label>
           <select
@@ -187,6 +243,16 @@ export default function StaffDeskPage() {
               </option>
             ))}
           </select>
+          <button
+            onClick={() => {
+              loadDashboard(selectedQueueId);
+              loadQueues();
+            }}
+            title="Refresh dashboard state"
+            className="p-2 rounded-xl border border-slate-200 dark:border-slate-700 hover:bg-slate-100 dark:hover:bg-slate-800 text-slate-600 dark:text-slate-300 transition-colors"
+          >
+            <RefreshCw className="w-4 h-4" />
+          </button>
         </div>
       </div>
 
@@ -419,8 +485,13 @@ export default function StaffDeskPage() {
                               <span className="text-slate-400">Standard</span>
                             )}
                           </td>
-                          <td className="px-4 py-3 text-slate-500">
-                            {new Date(w.joined_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                          <td className="px-4 py-3 text-slate-500 font-mono">
+                            {new Date(w.joined_at).toLocaleTimeString('en-US', {
+                              hour: 'numeric',
+                              minute: '2-digit',
+                              hour12: true,
+                              timeZone: 'Asia/Kolkata',
+                            })} IST
                           </td>
                           <td className="px-4 py-3 text-right">
                             <span className="px-2 py-0.5 rounded text-[10px] font-semibold bg-blue-50 text-blue-700 dark:bg-blue-950 dark:text-blue-300">

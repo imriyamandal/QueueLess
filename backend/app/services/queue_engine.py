@@ -1,4 +1,5 @@
 import json
+import logging
 from datetime import datetime, timezone
 from typing import Optional, Tuple
 from sqlalchemy.orm import Session
@@ -10,6 +11,8 @@ from app.models.models import (
 from app.services.prediction_engine import AdaptiveWaitingIntelligenceEngine
 from app.services.notification_service import NotificationService
 from app.websocket.manager import ws_manager
+
+logger = logging.getLogger("queueless.queue_engine")
 
 class QueueEngine:
     VALID_ENTRY_TRANSITIONS = {
@@ -84,7 +87,8 @@ class QueueEngine:
                     db, entry, service.name if service else "Service", int(pred["estimated_wait_seconds"] / 60)
                 )
             except Exception as e:
-                pass
+                db.rollback()
+                logger.error(f"Failed to dispatch join notification for ticket {entry.token_number}: {e}")
 
         return entry
 
@@ -146,8 +150,9 @@ class QueueEngine:
         # Trigger FCM Web Push & Call notification
         try:
             NotificationService.notify_ticket_called(db, next_entry, counter.name)
-        except Exception:
-            pass
+        except Exception as e:
+            db.rollback()
+            logger.error(f"Failed to dispatch called notification for ticket {next_entry.token_number}: {e}")
 
         # Notify the next visitor behind it that their turn is approaching
         try:
@@ -162,8 +167,9 @@ class QueueEngine:
                 NotificationService.notify_ticket_approaching(
                     db, following_entry, q_service.name if q_service else "Service", position_ahead=1
                 )
-        except Exception:
-            pass
+        except Exception as e:
+            db.rollback()
+            logger.error(f"Failed to dispatch approaching notification: {e}")
 
         db.commit()
         db.refresh(next_entry)
@@ -245,13 +251,14 @@ class QueueEngine:
         db.commit()
         db.refresh(entry)
 
-        # Trigger completion SMS
-        if entry.visitor_phone:
+        # Trigger completion notification (Push and/or SMS)
+        if entry.visitor_phone or entry.fcm_token:
             try:
                 service = db.query(Service).join(Queue, Queue.service_id == Service.id).filter(Queue.id == entry.queue_id).first()
                 NotificationService.notify_service_completed(db, entry, service.name if service else "Service")
-            except Exception:
-                pass
+            except Exception as e:
+                db.rollback()
+                logger.error(f"Failed to dispatch completion notification for ticket {entry.token_number}: {e}")
 
         return entry
 

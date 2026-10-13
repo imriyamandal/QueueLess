@@ -1,9 +1,10 @@
 'use client';
 
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { useParams, useRouter } from 'next/navigation';
 import { api, TicketDetail, WS_BASE_URL } from '../../../lib/api';
-import { requestPushPermissionAndGetToken, showLocalNotification } from '../../../lib/firebase';
+import { requestPushPermissionAndGetToken, showLocalNotification, onForegroundMessage } from '../../../lib/firebase';
+import LiveClockIST from '../../../components/LiveClockIST';
 import { 
   Clock, Users, MapPin, AlertCircle, ArrowLeft, CheckCircle2, 
   XCircle, Bell, RefreshCw, Radio, Compass, ShieldCheck, 
@@ -22,6 +23,8 @@ export default function TicketPage() {
   const [wsConnected, setWsConnected] = useState(false);
   const [actionLoading, setActionLoading] = useState(false);
   const [elapsedServiceSeconds, setElapsedServiceSeconds] = useState<number>(0);
+  const [turnAlert, setTurnAlert] = useState<string | null>(null);
+  const lastStateRef = useRef<{ status?: string; positionAhead?: number }>({});
 
   // FCM Web Push State
   const [pushEnabled, setPushEnabled] = useState(false);
@@ -75,6 +78,9 @@ export default function TicketPage() {
     }
   };
 
+  // Live dynamic remaining wait time (seconds) updating every second as real-world time passes
+  const [liveRemainingWait, setLiveRemainingWait] = useState<number | null>(null);
+
   // Time formatting helper
   const formatSeconds = (sec: number) => {
     if (sec <= 0) return '0s';
@@ -84,24 +90,76 @@ export default function TicketPage() {
     return `${m}m ${s > 0 ? `${s}s` : ''}`;
   };
 
+  const formatRemainingWait = (sec: number) => {
+    if (sec <= 0) return 'Due any moment';
+    const m = Math.floor(sec / 60);
+    const s = sec % 60;
+    if (m === 0) return `${s}s`;
+    if (m >= 5 && s === 0) return `${m} mins`;
+    return `${m}m ${s > 0 ? `${s}s` : ''}`.trim();
+  };
+
   const formatFacilityTime = (dateStr?: string, tz?: string) => {
     if (!dateStr) return '';
     try {
       const d = new Date(dateStr);
-      return d.toLocaleTimeString([], {
-        hour: '2-digit',
+      return d.toLocaleTimeString('en-US', {
+        hour: 'numeric',
         minute: '2-digit',
+        hour12: true,
         timeZone: tz || 'Asia/Kolkata',
       });
     } catch {
-      return new Date(dateStr).toLocaleTimeString();
+      return new Date(dateStr).toLocaleTimeString('en-US', { hour12: true });
     }
   };
+
+  // Live dynamic countdown timer that continuously recalculates remaining wait as real time passes
+  useEffect(() => {
+    if (ticketData?.ticket.status === 'WAITING' && ticketData?.estimated_turn_time) {
+      const targetMs = new Date(ticketData.estimated_turn_time).getTime();
+      const updateCountdown = () => {
+        const nowMs = Date.now();
+        const diffSec = Math.floor((targetMs - nowMs) / 1000);
+        setLiveRemainingWait(Math.max(0, diffSec));
+      };
+      updateCountdown();
+      const timer = setInterval(updateCountdown, 1000);
+      return () => clearInterval(timer);
+    } else {
+      setLiveRemainingWait(null);
+    }
+  }, [ticketData?.ticket.status, ticketData?.estimated_turn_time]);
 
   const loadTicket = async () => {
     if (!ticketId) return;
     try {
       const data = await api.getTicket(ticketId);
+      const prev = lastStateRef.current;
+      const newStatus = data.ticket.status;
+      const newPos = data.position_ahead;
+
+      // Detect transition to CALLED: trigger free browser notification and banner
+      if (prev.status && prev.status !== 'CALLED' && newStatus === 'CALLED') {
+        const title = `YOUR TURN IS CALLED! (Token ${data.ticket.token_number})`;
+        const body = `Please proceed immediately to ${data.ticket.assigned_counter_name || 'the service counter'}.`;
+        setTurnAlert(body);
+        showLocalNotification(title, { body });
+      } else if (
+        prev.status === 'WAITING' &&
+        newStatus === 'WAITING' &&
+        typeof newPos === 'number' &&
+        newPos <= 1 &&
+        (prev.positionAhead === undefined || prev.positionAhead > 1)
+      ) {
+        // Approaching alert
+        const title = `Your Turn is Approaching! (Token ${data.ticket.token_number})`;
+        const body = `Only ${newPos} ahead of you. Please prepare to proceed to the desk.`;
+        setTurnAlert(body);
+        showLocalNotification(title, { body });
+      }
+
+      lastStateRef.current = { status: newStatus, positionAhead: newPos };
       setTicketData(data);
       setError(null);
     } catch (err: any) {
@@ -113,6 +171,23 @@ export default function TicketPage() {
 
   useEffect(() => {
     loadTicket();
+  }, [ticketId]);
+
+  // Foreground FCM messages
+  useEffect(() => {
+    let unsubscribe: any = () => {};
+    onForegroundMessage((payload) => {
+      if (payload?.notification) {
+        setTurnAlert(payload.notification.body || 'New queue status update.');
+      }
+      loadTicket();
+    }).then((unsub) => {
+      unsubscribe = unsub;
+    });
+
+    return () => {
+      if (typeof unsubscribe === 'function') unsubscribe();
+    };
   }, [ticketId]);
 
   // Live elapsed service timer when IN_SERVICE
@@ -129,42 +204,59 @@ export default function TicketPage() {
     }
   }, [ticketData?.ticket.status, ticketData?.ticket.service_start_at]);
 
-  // WebSocket live synchronization
+  // Resilient WebSocket live synchronization with auto-reconnect
   useEffect(() => {
     if (!ticketData?.ticket.queue_id) return;
 
     let ws: WebSocket | null = null;
     let reconnectTimeout: any = null;
+    let isSubscribed = true;
 
     const connectWs = () => {
+      if (!isSubscribed) return;
       try {
         const url = `${WS_BASE_URL}/queues/${ticketData.ticket.queue_id}`;
         ws = new WebSocket(url);
 
-        ws.onopen = () => setWsConnected(true);
-        ws.onmessage = () => loadTicket();
+        ws.onopen = () => {
+          if (isSubscribed) setWsConnected(true);
+        };
+        ws.onmessage = () => {
+          if (isSubscribed) loadTicket();
+        };
         ws.onclose = () => {
-          setWsConnected(false);
-          reconnectTimeout = setTimeout(connectWs, 3000);
+          if (isSubscribed) {
+            setWsConnected(false);
+            reconnectTimeout = setTimeout(connectWs, 3000);
+          }
         };
         ws.onerror = () => {
-          setWsConnected(false);
-          ws?.close();
+          if (isSubscribed) {
+            setWsConnected(false);
+            ws?.close();
+          }
         };
       } catch (e) {
-        setWsConnected(false);
+        if (isSubscribed) {
+          setWsConnected(false);
+          reconnectTimeout = setTimeout(connectWs, 5000);
+        }
       }
     };
 
     connectWs();
-    const pollInterval = setInterval(loadTicket, 7000);
+    const pollIntervalMs = wsConnected ? 20000 : 6000;
+    const pollInterval = setInterval(() => {
+      if (isSubscribed) loadTicket();
+    }, pollIntervalMs);
 
     return () => {
+      isSubscribed = false;
       if (ws) ws.close();
-      clearTimeout(reconnectTimeout);
+      if (reconnectTimeout) clearTimeout(reconnectTimeout);
       clearInterval(pollInterval);
     };
-  }, [ticketData?.ticket.queue_id]);
+  }, [ticketData?.ticket.queue_id, wsConnected]);
 
   const handleCancel = async () => {
     if (!confirm('Are you sure you want to cancel your place in this queue?')) return;
@@ -269,11 +361,12 @@ export default function TicketPage() {
           <span>All Queues</span>
         </Link>
 
-        {/* WebSocket Live Sync Badge */}
+        {/* Status Indicators & Live Clock */}
         <div className="flex items-center space-x-3">
+          <LiveClockIST badgeOnly={true} className="text-xs" />
           <Link href="/app" className="flex items-center space-x-1 hover:text-blue-600 text-slate-500">
             <History className="w-3.5 h-3.5" />
-            <span>My History</span>
+            <span className="hidden sm:inline">My History</span>
           </Link>
           <div className="flex items-center space-x-1.5 font-medium">
             <span className={`w-2 h-2 rounded-full ${wsConnected ? 'bg-emerald-500 animate-pulse' : 'bg-amber-400'}`} />
@@ -281,6 +374,25 @@ export default function TicketPage() {
           </div>
         </div>
       </div>
+
+      {/* Prominent Real-time Turn Alert Banner */}
+      {turnAlert && (
+        <div className="p-4 rounded-2xl bg-amber-500/15 border-2 border-amber-500/40 text-amber-900 dark:text-amber-200 flex items-start justify-between gap-3 animate-fadeIn">
+          <div className="flex items-start space-x-2.5">
+            <Bell className="w-5 h-5 text-amber-600 dark:text-amber-400 shrink-0 mt-0.5 animate-bounce" />
+            <div>
+              <p className="text-xs font-bold uppercase tracking-wider text-amber-700 dark:text-amber-300">Live Queue Alert</p>
+              <p className="text-xs font-medium text-amber-900 dark:text-amber-100 mt-0.5">{turnAlert}</p>
+            </div>
+          </div>
+          <button
+            onClick={() => setTurnAlert(null)}
+            className="text-xs text-amber-700 dark:text-amber-300 font-bold hover:underline shrink-0"
+          >
+            Dismiss
+          </button>
+        </div>
+      )}
 
       {/* VIRTUAL TICKET PASS CARD */}
       <div className="bg-white dark:bg-slate-900 rounded-3xl border border-slate-200 dark:border-slate-800 shadow-xl overflow-hidden">
@@ -294,6 +406,9 @@ export default function TicketPage() {
           <div className="mt-3 flex items-center justify-center space-x-1 text-[11px] text-blue-200">
             <MapPin className="w-3 h-3" />
             <span>{ticketData.facility_name}</span>
+          </div>
+          <div className="mt-2.5 flex justify-center">
+            <LiveClockIST showDate={true} className="bg-white/20 text-white border-white/30 text-[11px]" />
           </div>
         </div>
 
@@ -355,28 +470,35 @@ export default function TicketPage() {
                 </div>
 
                 <div className="p-4 rounded-2xl bg-slate-50 dark:bg-slate-800/60 border border-slate-100 dark:border-slate-800 text-center">
-                  <span className="text-[11px] font-semibold text-slate-500 dark:text-slate-400">Est. Wait</span>
+                  <div className="flex items-center justify-center space-x-1">
+                    <span className="text-[11px] font-semibold text-slate-500 dark:text-slate-400">Remaining Wait</span>
+                    <span className="inline-block w-1.5 h-1.5 rounded-full bg-blue-500 animate-pulse" title="Dynamic real-time ETA" />
+                  </div>
                   <div className="text-2xl font-black text-blue-600 dark:text-blue-400 mt-0.5">
-                    {formatSeconds(estimated_wait_seconds)}
+                    {liveRemainingWait !== null ? formatRemainingWait(liveRemainingWait) : formatRemainingWait(estimated_wait_seconds)}
                   </div>
                   <span className="text-[10px] text-slate-500">
-                    Range: {formatSeconds(lower_bound_seconds)}–{formatSeconds(upper_bound_seconds)}
+                    Est. Range: {formatSeconds(lower_bound_seconds)}–{formatSeconds(upper_bound_seconds)}
                   </span>
                 </div>
               </div>
 
-              {/* Expected Turn-Time Range Card */}
+              {/* Expected Service Time Card */}
               {estimated_turn_time && (
-                <div className="p-3.5 bg-slate-50 dark:bg-slate-800/60 rounded-xl border border-slate-200 dark:border-slate-700/60 flex items-center justify-between text-xs">
+                <div className="p-4 bg-slate-50 dark:bg-slate-800/60 rounded-2xl border border-slate-200 dark:border-slate-700/60 flex items-center justify-between text-xs">
                   <div>
-                    <span className="text-slate-500 text-[10px] uppercase font-semibold">Expected Turn Time</span>
-                    <div className="font-bold text-slate-900 dark:text-white text-sm">
-                      ~{formatFacilityTime(estimated_turn_time, facility_timezone)}
+                    <div className="flex items-center space-x-1.5">
+                      <Clock className="w-3.5 h-3.5 text-blue-600 dark:text-blue-400" />
+                      <span className="text-slate-500 text-[10px] uppercase font-bold tracking-wider">Expected Service Time</span>
                     </div>
+                    <div className="font-extrabold text-slate-900 dark:text-white text-base mt-0.5">
+                      ~{formatFacilityTime(estimated_turn_time, facility_timezone)} <span className="text-[10px] text-blue-600 dark:text-blue-400 font-bold">IST</span>
+                    </div>
+                    <span className="text-[10px] text-slate-400 italic">Dynamic estimate based on live queue pace</span>
                   </div>
                   <div className="text-right">
-                    <span className="text-[10px] text-slate-400">Time Range:</span>
-                    <div className="text-xs font-semibold text-blue-600 dark:text-blue-400">
+                    <span className="text-[10px] text-slate-400 font-medium">Estimated Window</span>
+                    <div className="text-xs font-bold text-blue-600 dark:text-blue-400">
                       {formatFacilityTime(turn_time_lower, facility_timezone)} – {formatFacilityTime(turn_time_upper, facility_timezone)}
                     </div>
                   </div>

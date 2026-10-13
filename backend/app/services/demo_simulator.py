@@ -2,7 +2,7 @@ import random
 from datetime import datetime, timezone, timedelta
 from sqlalchemy.orm import Session
 from app.models.models import (
-    Facility, Department, Service, Queue, ServiceCounter, CounterService, QueueEntry, QueueEvent, User, utc_now
+    PredictionSnapshot, Facility, Department, Service, Queue, ServiceCounter, CounterService, QueueEntry, QueueEvent, User, utc_now
 )
 from app.services.queue_engine import QueueEngine
 from app.services.prediction_engine import AdaptiveWaitingIntelligenceEngine

@@ -4,6 +4,7 @@ import { useState, useEffect } from 'react';
 import { useRouter } from 'next/navigation';
 import { api, QueueItem, Service } from '../../lib/api';
 import { Clock, Users, ArrowRight, ShieldCheck, MapPin, Sparkles, AlertCircle } from 'lucide-react';
+import LiveClockIST from '../../components/LiveClockIST';
 
 export default function JoinQueuePage() {
   const router = useRouter();
@@ -78,9 +79,12 @@ export default function JoinQueuePage() {
   return (
     <div className="max-w-4xl mx-auto px-4 py-12">
       <div className="text-center max-w-xl mx-auto mb-10 space-y-2">
-        <div className="inline-flex items-center space-x-1.5 px-3 py-1 rounded-full text-xs font-semibold bg-blue-50 dark:bg-blue-950/60 text-blue-700 dark:text-blue-300 border border-blue-200 dark:border-blue-800">
-          <Clock className="w-3.5 h-3.5" />
-          <span>Zero-Contact Virtual Entry</span>
+        <div className="flex flex-wrap items-center justify-center gap-2">
+          <div className="inline-flex items-center space-x-1.5 px-3 py-1 rounded-full text-xs font-semibold bg-blue-50 dark:bg-blue-950/60 text-blue-700 dark:text-blue-300 border border-blue-200 dark:border-blue-800">
+            <Clock className="w-3.5 h-3.5" />
+            <span>Zero-Contact Virtual Entry</span>
+          </div>
+          <LiveClockIST showDate={true} />
         </div>
         <h1 className="text-3xl sm:text-4xl font-extrabold text-slate-900 dark:text-white tracking-tight">
           Join a Digital Queue

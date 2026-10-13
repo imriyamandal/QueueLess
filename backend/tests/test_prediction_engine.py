@@ -32,3 +32,13 @@ def test_counter_pause_impact_on_estimates(db_session):
     # Upper bound should expand or explanation reflects pause
     assert pred_after["upper_bound_seconds"] >= pred_before["upper_bound_seconds"]
     assert "paused" in pred_after["explanation"].lower() or pred_after["active_counters_count"] <= pred_before["active_counters_count"]
+
+def test_dynamic_eta_calculation_with_elapsed_time(db_session):
+    q = db_session.query(Queue).filter(Queue.status == "OPEN").first()
+    entry = QueueEngine.join_queue(db_session, q.id, "Elapsed Time Test Visitor")
+
+    pred = AdaptiveWaitingIntelligenceEngine.calculate_ticket_prediction(db_session, entry.id, record_snapshot=False)
+    assert pred["estimated_wait_seconds"] >= 0
+    assert pred["estimated_turn_time"] is not None
+    assert pred["facility_timezone"] == "Asia/Kolkata"
+    assert pred["turn_time_lower"] <= pred["turn_time_upper"]
